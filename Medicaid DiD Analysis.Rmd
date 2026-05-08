@@ -1,0 +1,287 @@
+---
+title: "Causal Inference Final Project"
+author: "wengel"
+date: "2026-05-08"
+output: pdf_document
+---
+```{r setup, message=FALSE, warning=FALSE}
+library(data.table)
+library(dplyr)
+library(ggplot2)
+library(fixest)
+library(modelsummary)
+library(knitr)
+library(MatchIt)
+library(cobalt)
+
+set.seed(123)
+```
+
+```{r load-data}
+df <- fread("Insurance.csv")
+
+df <- df %>%
+  select(YEAR, STATEFIP, MET2013, SEX, AGE, RACE, RACED, HCOVANY) %>%
+  filter(
+    YEAR %in% c(2013, 2014, 2015),
+    STATEFIP %in% c(6, 48),
+    AGE >= 19,
+    AGE <= 64
+  ) %>%
+  mutate(
+    state = case_when(
+      STATEFIP == 6 ~ "California",
+      STATEFIP == 48 ~ "Texas"
+    ),
+    expansion = ifelse(STATEFIP == 6, 1, 0),
+    insured = ifelse(HCOVANY == 2, 1,
+                     ifelse(HCOVANY == 1, 0, NA)),
+    female = ifelse(SEX == 2, 1, 0),
+    metro = ifelse(MET2013 > 0, 1, 0),
+    metro_f = factor(metro, levels = c(0, 1),
+                     labels = c("Non-metro", "Metro")),
+    race_f = factor(RACE)
+  )
+```
+
+```{r main-analysis-sample}
+main_df <- df %>%
+  filter(YEAR %in% c(2013, 2015)) %>%
+  mutate(
+    post = ifelse(YEAR == 2015, 1, 0),
+    period = ifelse(YEAR == 2013, "Pre (2013)", "Post (2015)"),
+    group = paste(state, period)
+  )
+```
+
+```{r summary-statistics}
+mean_sd <- function(x) {
+  paste0(
+    round(mean(x, na.rm = TRUE), 3),
+    " (",
+    round(sd(x, na.rm = TRUE), 3),
+    ")"
+  )
+}
+
+table1 <- data.frame(
+  Variable = c("Insured", "Age", "Female", "Metro", "Observations"),
+
+  "California Pre (2013)" = c(
+    mean_sd(main_df$insured[main_df$group == "California Pre (2013)"]),
+    mean_sd(main_df$AGE[main_df$group == "California Pre (2013)"]),
+    mean_sd(main_df$female[main_df$group == "California Pre (2013)"]),
+    mean_sd(main_df$metro[main_df$group == "California Pre (2013)"]),
+    sum(main_df$group == "California Pre (2013)")
+  ),
+
+  "California Post (2015)" = c(
+    mean_sd(main_df$insured[main_df$group == "California Post (2015)"]),
+    mean_sd(main_df$AGE[main_df$group == "California Post (2015)"]),
+    mean_sd(main_df$female[main_df$group == "California Post (2015)"]),
+    mean_sd(main_df$metro[main_df$group == "California Post (2015)"]),
+    sum(main_df$group == "California Post (2015)")
+  ),
+
+  "Texas Pre (2013)" = c(
+    mean_sd(main_df$insured[main_df$group == "Texas Pre (2013)"]),
+    mean_sd(main_df$AGE[main_df$group == "Texas Pre (2013)"]),
+    mean_sd(main_df$female[main_df$group == "Texas Pre (2013)"]),
+    mean_sd(main_df$metro[main_df$group == "Texas Pre (2013)"]),
+    sum(main_df$group == "Texas Pre (2013)")
+  ),
+
+  "Texas Post (2015)" = c(
+    mean_sd(main_df$insured[main_df$group == "Texas Post (2015)"]),
+    mean_sd(main_df$AGE[main_df$group == "Texas Post (2015)"]),
+    mean_sd(main_df$female[main_df$group == "Texas Post (2015)"]),
+    mean_sd(main_df$metro[main_df$group == "Texas Post (2015)"]),
+    sum(main_df$group == "Texas Post (2015)")
+  ),
+
+  check.names = FALSE
+)
+
+kable(table1, caption = "Summary Statistics")
+
+write.csv(table1, "table1_summary.csv", row.names = FALSE)
+```
+
+```{r did-means}
+did_means <- main_df %>%
+  group_by(state, YEAR) %>%
+  summarise(
+    insured_rate = mean(insured, na.rm = TRUE),
+    n = n(),
+    .groups = "drop"
+  )
+
+kable(did_means, caption = "Insurance Coverage Rates by State and Year")
+```
+
+```{r coverage-plot}
+p1 <- ggplot(did_means,
+             aes(x = YEAR,
+                 y = insured_rate,
+                 color = state,
+                 group = state)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  scale_x_continuous(breaks = c(2013, 2015)) +
+  labs(
+    title = "Insurance Coverage Rates in California and Texas",
+    x = "Year",
+    y = "Insured Rate",
+    color = "State"
+  ) +
+  theme_minimal()
+
+p1
+
+ggsave("coverage_trend_ca_tx.png", p1, width = 7, height = 5, dpi = 300)
+```
+
+```{r main-did-model}
+did_model <- feols(
+  insured ~ expansion * post + AGE + female + race_f,
+  data = main_df,
+  vcov = "hetero"
+)
+
+summary(did_model)
+```
+
+```{r heterogeneity-model}
+hetero_model <- feols(
+  insured ~ expansion * post * metro + AGE + female + race_f,
+  data = main_df,
+  vcov = "hetero"
+)
+
+summary(hetero_model)
+```
+
+```{r subgroup-models}
+did_metro <- feols(
+  insured ~ expansion * post + AGE + female + race_f,
+  data = main_df %>% filter(metro == 1),
+  vcov = "hetero"
+)
+
+did_nonmetro <- feols(
+  insured ~ expansion * post + AGE + female + race_f,
+  data = main_df %>% filter(metro == 0),
+  vcov = "hetero"
+)
+
+summary(did_metro)
+summary(did_nonmetro)
+```
+
+```{r metro-plot}
+interaction_plot <- main_df %>%
+  group_by(state, YEAR, metro) %>%
+  summarise(
+    insured_rate = mean(insured, na.rm = TRUE),
+    n = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    metro_status = ifelse(metro == 1, "Metro", "Non-metro"),
+    group_label = paste(state, metro_status, sep = " - ")
+  )
+
+p2 <- ggplot(interaction_plot,
+             aes(x = YEAR,
+                 y = insured_rate,
+                 color = state,
+                 linetype = metro_status,
+                 group = group_label)) +
+  geom_line(linewidth = 1) +
+  geom_point(size = 2) +
+  scale_x_continuous(breaks = c(2013, 2015)) +
+  labs(
+    title = "Medicaid Expansion Effects by Metro Status",
+    x = "Year",
+    y = "Insured Rate",
+    color = "State",
+    linetype = "Metro Status"
+  ) +
+  theme_minimal()
+
+p2
+
+ggsave("metro_vs_nonmetro.png", p2, width = 7, height = 5, dpi = 300)
+```
+
+```{r robustness-2014-post}
+robust_df <- df %>%
+  filter(YEAR %in% c(2013, 2014, 2015)) %>%
+  mutate(post = ifelse(YEAR >= 2014, 1, 0))
+
+did_model_postall <- feols(
+  insured ~ expansion * post + AGE + female + race_f + factor(YEAR),
+  data = robust_df,
+  vcov = "hetero"
+)
+
+hetero_model_postall <- feols(
+  insured ~ expansion * post * metro + AGE + female + race_f + factor(YEAR),
+  data = robust_df,
+  vcov = "hetero"
+)
+
+summary(did_model_postall)
+summary(hetero_model_postall)
+```
+
+```{r matching-robustness}
+psm_df <- main_df %>%
+  select(insured, expansion, post, YEAR, AGE, female, race_f, metro)
+
+m_out <- matchit(
+  expansion ~ AGE + female + race_f + metro,
+  data = psm_df,
+  method = "nearest",
+  distance = "logit",
+  exact = ~ YEAR
+)
+
+summary(m_out)
+
+matched_df <- match.data(m_out)
+
+did_model_matched <- feols(
+  insured ~ expansion * post + AGE + female + race_f,
+  data = matched_df,
+  weights = ~ weights,
+  vcov = "hetero"
+)
+
+hetero_model_matched <- feols(
+  insured ~ expansion * post * metro + AGE + female + race_f,
+  data = matched_df,
+  weights = ~ weights,
+  vcov = "hetero"
+)
+
+summary(did_model_matched)
+summary(hetero_model_matched)
+```
+
+```{r regression-table}
+modelsummary(
+  list(
+    "Main DiD" = did_model,
+    "DiD x Metro" = hetero_model,
+    "Matched DiD" = did_model_matched
+  ),
+  stars = TRUE,
+  gof_omit = "AIC|BIC|Log.Lik|RMSE",
+  output = "markdown"
+)
+```
+
+
+
+
