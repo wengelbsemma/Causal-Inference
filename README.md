@@ -27,6 +27,7 @@ A second model adds a triple interaction between expansion status, post period, 
 - `outputs/table1_summary.csv`: Summary statistics table.
 - `outputs/coverage_trend_ca_tx.png`: Pre/post insurance coverage plot by state.
 - `outputs/coverage_by_metro_status.png`: Pre/post insurance coverage plot by metro status.
+- `Medicaid Analysis Final Report.pdf`: Full report of Analysis
 
 ## Main findings
 
